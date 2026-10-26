@@ -61,13 +61,26 @@ fn main() -> Status {
     // craft) - the screen goes dark from that point until Windows boots.
     // The log file keeps recording and is the evidence record.
     #[cfg(feature = "tx")]
-    if let Some(gpu_handle) = &gpu {
-        tx_phase(gpu_handle.handle);
+    let tx_ready = if let Some(gpu_handle) = &gpu {
+        tx_phase(gpu_handle.handle)
+    } else {
+        false
+    };
+    #[cfg(not(feature = "tx"))]
+    let tx_ready = false;
+
+    // A completed transaction gets a short, user-cancellable handoff window.
+    // Failures and read-only runs keep their existing immediate chain behavior.
+    if tx_ready {
+        if let Err(e) = chainload::wait_before_default_boot() {
+            info!("CHAIN: automatic default boot aborted: {:?}", e.status());
+            logging::finish();
+            return e.status();
+        }
     }
 
-    // Phase: CHAIN. Read-only LoadImage/StartImage of the ESP bootmgfw.efi.
-    // The verdict lines above are in \loader.log; no pause before handing
-    // off (the log file is the evidence record, not the screen).
+    // Phase: CHAIN. Read-only LoadImage/StartImage of the OS loader selected
+    // by the existing default candidate order.
     match chainload::chain_load_bootmgfw() {
         Ok(()) => info!("CHAIN: bootmgfw returned unexpectedly"),
         Err(e) => info!("CHAIN: failed: {:?}", e.status()),
@@ -80,7 +93,7 @@ fn main() -> Status {
 
 
 #[cfg(feature = "tx")]
-fn tx_phase(handle: uefi::Handle) {
+fn tx_phase(handle: uefi::Handle) -> bool {
     use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams};
     let proto = unsafe {
         boot::open_protocol::<pci::PciIo>(
@@ -90,7 +103,7 @@ fn tx_phase(handle: uefi::Handle) {
     };
     let Ok(pci) = proto else {
         info!("TX: open PciIo failed");
-        return;
+        return false;
     };
     let gpu = tx::TxGpu { pci: &pci, bar: 0 };
     tx::list_root_entries();
@@ -122,7 +135,7 @@ fn tx_phase(handle: uefi::Handle) {
         0x1e02..=0x1fff | 0x2182..=0x2192 => "tu10x",
         other => {
             info!("TX: device 10de:{other:04x} has no asset family mapping - skipping");
-            return;
+            return false;
         }
     };
     info!("TX: device 10de:{dev:04x} -> asset family '{family}'");
@@ -136,7 +149,7 @@ fn tx_phase(handle: uefi::Handle) {
     let (Some(booter), Some(gsp_boot), Some(gsp_image), Some(stock_sig)) =
         (booter, gsp_boot, gsp_image, stock_sig) else {
         info!("TX: assets missing for family '{family}' (booter_load_*/gsp_boot_*/fwimage_*/fwsignature_*) - skipping");
-        return;
+        return false;
     };
     if v67.is_none() {
         info!("TX: NO V67 file - chain-replay mode (no unlock writes)");
@@ -149,13 +162,14 @@ fn tx_phase(handle: uefi::Handle) {
         // entering the GA10x HS chain on TU106 would write wrong states.
         // Assets above are parsed+verified as evidence only.
         info!("TX: family 'tu10x' - Turing transaction track not enabled yet, skipping (no writes)");
-        return;
+        return false;
     }
     let assets = tx::TxAssets { family, booter, boot_desc, gsp_boot, gsp_image, stock_sig, v67 };
     match tx::run_transaction(&gpu, &assets, handle) {
         Ok(()) => {
             info!("SELECTOR RESULT: transaction complete");
             tx::handoff_out(&pci);
+            assets.v67.is_some()
         }
         // Already-open PLM = already unlocked or not cold: skip (success
         // class, gpu-unlock-ada da96e3f), definitely no FLR - it would wipe
@@ -163,6 +177,7 @@ fn tx_phase(handle: uefi::Handle) {
         Err(tx::TxError::EAlready) => {
             info!("TX: already unlocked / not cold (EALREADY) - skipped, nothing to unwind");
             tx::handoff_out(&pci);
+            true
         }
         // Warm entry with the require-D0 switch: nothing was written, the
         // card was not even reset - the clean "come back after a Restart"
@@ -171,6 +186,7 @@ fn tx_phase(handle: uefi::Handle) {
         Err(tx::TxError::EWarm) => {
             info!("TX: aborted on warm/resume entry before any GPU write - chain-loading unchanged Windows (use a Restart or cold boot)");
             tx::handoff_out(&pci);
+            false
         }
         Err(e) => {
             info!("TX: transaction failed: {e:?} - NOT retrying this session");
@@ -178,6 +194,7 @@ fn tx_phase(handle: uefi::Handle) {
             // DMA queues) so the Windows driver gets a cold-boot card.
             tx::emergency_flr(handle);
             tx::handoff_out(&pci);
+            false
         }
     }
 }

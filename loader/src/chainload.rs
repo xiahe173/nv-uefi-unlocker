@@ -1,15 +1,15 @@
 //! Read-only chain-load of the OS bootloader (constitution §1.3:
 //! LoadImage/StartImage only, never overwrite the ESP).
 //!
-//! Strategy: probe every SimpleFileSystem volume for the candidate loaders
-//! in priority order — Windows bootmgfw first, then the common Linux
-//! loader paths, and finally the generic removable-media BOOTX64.EFI as a
-//! last resort. Because that generic path is also where THIS application
-//! usually lives, the last resort is guarded by a 5-second key window: the
-//! user may abort to the firmware shell (the transaction is already
-//! complete and logged) and the self-volume is excluded by fingerprint
-//! (our own image device path), because the handle-level match is not
-//! reliable across firmware implementations.
+//! Strategy: after a completed transaction, wait five seconds before probing
+//! candidate loaders. Any key aborts automatic boot and returns to the firmware
+//! shell. On timeout, probe every SimpleFileSystem volume in priority order —
+//! Windows bootmgfw first, then the common Linux loader paths, and finally the
+//! generic removable-media BOOTX64.EFI as a last resort. Because that generic
+//! path is also where THIS application usually lives, the last resort keeps a
+//! separate 5-second key window and excludes the self-volume by fingerprint
+//! (our own image device path), because the handle-level match is not reliable
+//! across firmware implementations.
 
 use alloc::vec::Vec;
 use log::info;
@@ -49,6 +49,29 @@ const NODE_SUBTYPE_FILE: u8 = 0x04;
 const NODE_TYPE_END: u8 = 0x7f;
 /// END_ENTIRE node: type 0x7f, subtype 0xff, length 0x0004 (little endian).
 const END_ENTIRE: [u8; 4] = [0x7f, 0xff, 0x04, 0x00];
+
+/// Give the user a five-second handoff gate after a completed transaction.
+/// Timeout continues into the existing default candidate order; any key leaves
+/// the application without loading another EFI image.
+pub fn wait_before_default_boot() -> Result<()> {
+    info!("==================================================");
+    info!(" UNLOCK SUCCESS");
+    info!(" GPU unlock completed; default boot flow is next.");
+    info!("==================================================");
+    info!(" 5s TIMEOUT: default boot starts automatically");
+    info!(" PRESS ANY KEY TO ABORT AUTOMATIC BOOT");
+    info!("==================================================");
+    match crate::keywait::wait_any_key_or_timeout(5) {
+        crate::keywait::KeyOrTimeout::Key(k) => {
+            info!("CHAIN: key {:?} - automatic default boot cancelled", k);
+            Err(uefi::Status::ABORTED.into())
+        }
+        crate::keywait::KeyOrTimeout::Timeout => {
+            info!(" 5s TIMEOUT REACHED: entering default boot flow");
+            Ok(())
+        }
+    }
+}
 
 pub fn chain_load_bootmgfw() -> Result<()> {
     info!("PHASE: CHAIN");

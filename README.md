@@ -40,11 +40,7 @@ FP16 GEMM 29.89 → 49.33 TFLOPS（1.65×）。完整报告见
 1. BIOS：关 Secure Boot。显示模式/进入方式按下面的实测表选——**推荐独显直连**，
    混合模式只在"重启、且 dGPU 有电"这一种进入方式下可用（见原因分析）。
 2. U 盘启动 → 版本屏 → **空格确认**（30 秒无操作自动回 Windows）。
-3. 之后全自动：事务完成或失败都会自动链回 bootmgfw 进 Windows，全程日志
-   落 U 盘 `\loader.log`。引导器查找顺序固定为 **bootmgfw → 各发行版
-   shim/grub/systemd-boot → U 盘 `\EFI\BOOT\BOOTX64.EFI`**；只有走到最后
-   这一档（即本工具自己所在的通用路径）才给 5 秒窗口，按任意键回固件
-   shell（此时解锁已完成、日志已落盘，可从 shell 手动启动任何系统）。
+3. 之后事务完成会先倒计时 5 秒，按任意键终止自动启动并返回固件；超时后进入默认引导流程。事务失败仍会自动链回 bootmgfw。完整日志落 U 盘 `\loader.log`。默认查找顺序固定为 **bootmgfw → 各发行版 shim/grub/systemd-boot → U 盘 `\EFI\BOOT\BOOTX64.EFI`**；最后一档通用路径仍保留独立的 5 秒窗口，按任意键也可返回固件 shell。
 4. 每次冷启动重放一次（解锁易失，无持久化、无刷写、断电即清）。
 
 V67 payload 与全部资产再生成：`cargo run -p assets -- generate-ad102` /
